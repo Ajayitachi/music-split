@@ -8,6 +8,7 @@ its chosen delay for the whole movie.
 """
 
 import collections
+import sys
 import threading
 import time
 import warnings
@@ -16,12 +17,23 @@ import numpy as np
 import soundcard as sc
 
 warnings.filterwarnings("ignore", category=sc.SoundcardRuntimeWarning)
+# Let audio threads take turns more often (default 5 ms is long when 5 threads share one 10 ms block).
+sys.setswitchinterval(0.002)
 
 SAMPLE_RATE = 48000
 CHANNELS = 2
 BLOCK = 480                       # 10 ms per block
-JITTER_MS = 40                    # safety buffer on top of the user's delay
-PLAYER_BUFFER = int(SAMPLE_RATE * 0.04)
+# Buffer sizes. Small buffers = low delay but crackle when the PC is busy (several devices at once).
+# So every output starts small and grows its own buffers by itself whenever it runs dry, until the
+# crackle stops. Measured with OnePlus Nord Buds 3 Pro: 20/20 ms adds ~120-150 ms over the source,
+# 40/40 ms ~200 ms; with 4 devices the 20 ms queue ran dry a few times (heard as crackle).
+JITTER_MS = 20                    # starting safety buffer on top of the user's delay
+MAX_EXTRA_MS = 100                # how far the safety buffer may grow on its own
+PLAYER_MS = 30                    # starting device buffer
+MAX_PLAYER_MS = 80
+GROW_MS = 10
+PLAYER_BUFFER = int(SAMPLE_RATE * PLAYER_MS / 1000)
+CAPTURE_BUFFER = SAMPLE_RATE // 100
 MAX_QUEUE_SECONDS = 3.0
 
 
@@ -58,6 +70,12 @@ class Output:
         self.delay_ms = 0
         self.volume = 1.0
         self.status = "off"
+        self.level = 0.0             # 0..1 loudness of what this device is playing, for the meter
+        self.starved = 0             # times our queue ran empty while the movie was playing (crackle)
+        self.device_empty = 0        # times the device buffer ran empty (we wrote too late: crackle)
+        self.extra_ms = 0            # safety buffer added automatically after crackles
+        self.player_ms = PLAYER_MS   # device buffer, grows automatically after crackles
+        self._dry_since = None
         self._queue = collections.deque()
         self._frames = 0
         self._lock = threading.Lock()
@@ -70,6 +88,15 @@ class Output:
     def push(self, block):
         if not self._running:
             return
+        now = time.monotonic()
+        dry = self._dry_since
+        if dry is not None:
+            self._dry_since = None
+            if now - dry < 0.15:
+                # we ran dry but sound was back within 150 ms: a real hiccup (heard as a click),
+                # so keep a bigger safety buffer from now on
+                self.starved += 1
+                self.extra_ms = min(self.extra_ms + GROW_MS, MAX_EXTRA_MS)
         with self._lock:
             self._queue.append(block)
             self._frames += block.shape[0]
@@ -94,6 +121,7 @@ class Output:
             self._queue.clear()
             self._frames = 0
         self.status = "off"
+        self.level = 0.0
 
     @property
     def running(self):
@@ -101,7 +129,12 @@ class Output:
 
     # ---- internals ----
     def _target(self):
-        return int((self.delay_ms + JITTER_MS) * SAMPLE_RATE / 1000)
+        return int((self.delay_ms + JITTER_MS + self.extra_ms) * SAMPLE_RATE / 1000)
+
+    @property
+    def safety_ms(self):
+        """How much buffering was added automatically to stop crackling."""
+        return self.extra_ms + self.player_ms - PLAYER_MS
 
     def _pop(self, n):
         out = np.zeros((n, CHANNELS), dtype=np.float32)
@@ -143,7 +176,11 @@ class Output:
                 return silence              # build up the requested delay
             self._priming = False
         if depth == 0:
-            self._priming = True            # source stalled: rebuild delay
+            # Ran dry. push() decides if it was a glitch (sound comes back right away) or just the
+            # movie stopping/pausing (sound stays away).
+            if self._dry_since is None:
+                self._dry_since = time.monotonic()
+            self._priming = True            # rebuild delay
             return silence
 
         err = depth - target
@@ -173,12 +210,22 @@ class Output:
         while self._running:
             try:
                 speaker = find_speaker(self.device_id)
+                size = self.player_ms
                 with speaker.player(samplerate=SAMPLE_RATE, channels=CHANNELS,
-                                    blocksize=PLAYER_BUFFER) as player:
+                                    blocksize=int(SAMPLE_RATE * size / 1000)) as player:
                     self._priming = True
                     self.status = "playing"
                     while self._running:
-                        player.play(self._next_chunk())
+                        if not self._priming and player.currentpadding == 0:
+                            # device played everything we gave it: we were late (click).
+                            # Use a bigger device buffer (re-open the device to apply it).
+                            self.device_empty += 1
+                            if self.player_ms < MAX_PLAYER_MS:
+                                self.player_ms = min(self.player_ms + GROW_MS, MAX_PLAYER_MS)
+                                break
+                        chunk = self._next_chunk()
+                        self.level = max(float(np.abs(chunk).max()), self.level * 0.85)
+                        player.play(chunk)
             except Exception as exc:   # device unplugged / turned off
                 self.status = f"waiting for device ({exc.__class__.__name__})"
                 for _ in range(20):
@@ -199,6 +246,7 @@ class Engine:
         self.sync_clicks = False
         self._running = False
         self._thread = None
+        self._beeper = None
         self._click_pos = 0
 
     def output(self, device_id, name):
@@ -218,38 +266,56 @@ class Engine:
         self._running = True
         self._thread = threading.Thread(target=self._capture, name="capture", daemon=True)
         self._thread.start()
+        self._beeper = threading.Thread(target=self._beep_loop, name="beeper", daemon=True)
+        self._beeper.start()
 
     def stop(self):
         self._running = False
-        if self._thread:
-            self._thread.join(timeout=2)
-        self._thread = None
+        for th in (self._thread, getattr(self, "_beeper", None)):
+            if th:
+                th.join(timeout=2)
+        self._thread = self._beeper = None
         for out in self.outputs.values():
             out.stop()
         self.level = 0.0
         self.status = "stopped"
 
-    def _add_clicks(self, block):
-        """Short beep once a second, to line up the delays by ear."""
+    def _click_block(self):
+        """10 ms of the sync signal: a short 1 kHz beep once a second, silence otherwise."""
         period = SAMPLE_RATE
         length = SAMPLE_RATE // 100
-        pos = (self._click_pos + np.arange(block.shape[0])) % period
-        beep = np.where(pos < length, 0.5 * np.sin(2 * np.pi * 1000 * pos / SAMPLE_RATE), 0.0)
-        block = block + beep[:, None].astype(np.float32)
-        self._click_pos = (self._click_pos + block.shape[0]) % period
-        return block
+        pos = (self._click_pos + np.arange(BLOCK)) % period
+        beep = np.where(pos < length, 0.4 * np.sin(2 * np.pi * 1000 * pos / SAMPLE_RATE), 0.0)
+        self._click_pos = (self._click_pos + BLOCK) % period
+        return np.repeat(beep[:, None], CHANNELS, axis=1).astype(np.float32)
+
+    def _beep_loop(self):
+        """Sync test: play the beep ON the source device, like a movie would. The source plays it
+        directly and the capture copies it to every output, so all devices get the same beep through
+        the same path as the movie sound."""
+        while self._running:
+            if not self.sync_clicks:
+                time.sleep(0.1)
+                continue
+            src = self.source_id
+            try:
+                with find_speaker(src).player(samplerate=SAMPLE_RATE, channels=CHANNELS,
+                                              blocksize=PLAYER_BUFFER) as player:
+                    self._click_pos = 0
+                    while self._running and self.sync_clicks and self.source_id == src:
+                        player.play(self._click_block())
+            except Exception:
+                time.sleep(1)
 
     def _capture(self):
         while self._running:
             try:
                 mic = find_loopback(self.source_id)
                 with mic.recorder(samplerate=SAMPLE_RATE, channels=CHANNELS,
-                                  blocksize=SAMPLE_RATE // 50) as rec:
+                                  blocksize=CAPTURE_BUFFER) as rec:
                     self.status = "running"
                     while self._running:
                         block = rec.record(numframes=BLOCK).astype(np.float32)
-                        if self.sync_clicks:
-                            block = self._add_clicks(block)
                         peak = float(np.abs(block).max()) if block.size else 0.0
                         self.level = max(peak, self.level * 0.9)
                         for out in list(self.outputs.values()):
