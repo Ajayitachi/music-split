@@ -72,6 +72,8 @@ def finish():
 
 
 def go():
+    app.show_virtual.set(True)       # test every output, including the hidden virtual ones
+    app.on_show_virtual()
     for row in app.rows.values():
         row["enabled"].set(True)
     app.on_row_changed()

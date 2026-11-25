@@ -31,6 +31,16 @@ def device_parents():
     return parents
 
 
+_VIRTUAL_WORDS = ("steam streaming", "virtual", "voice changer", "ai noise", "cable input",
+                  "vb-audio", "voicemeeter", "nvidia broadcast", "krisp", "voicemod")
+
+
+def is_virtual(name):
+    """Software-only outputs (Steam, voice changers, noise filters): nobody listens to these."""
+    n = name.lower()
+    return any(w in n for w in _VIRTUAL_WORDS)
+
+
 def classify(name, parent):
     """Short label for the device type."""
     n = name.lower()
@@ -45,4 +55,8 @@ def classify(name, parent):
         return "Digital (S/PDIF)"
     if p.startswith("HDAUDIO"):
         return "Wired (3.5 mm jack)" if "headphone" in n else "PC speakers / 3.5 mm jack"
+    if "speaker" in n:
+        return "PC speakers"
+    if "headphone" in n:
+        return "Wired (3.5 mm jack)"
     return "Other"

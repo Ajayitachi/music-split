@@ -55,6 +55,21 @@ volume and sync delay. (Phones can't do this from a normal app, so we chose a Wi
 - **Boult earbuds ("SHK BOULTT")** are not paired yet. The PC only saw their Bluetooth LE signal; one
   pairing attempt failed authentication. Needs: forget on phone, phone BT off, reset/pairing mode.
 
+## Update 2026-11-25 (home ASUS laptop)
+- Now a real Windows app: mixer-style dark UI (one channel strip per device: switch, vertical volume
+  fader, LED meter, Delay −/+), PyInstaller build (`build.bat`), per-user installer (`installer/`),
+  settings in `%APPDATA%\Multi Headphones` when installed. Release zip goes on GitHub Releases.
+- Latency: smaller buffers (~120–150 ms over the source for Bluetooth instead of ~200 ms). Each output
+  grows its own buffer automatically after a real dropout (`Output.extra_ms` / `player_ms`, shown as
+  "+N ms anti-crackle").
+- Sync beep now plays ON the source device, so it reaches the source and is copied like movie sound.
+- **Open issue:** user still hears crackle ("chirr") with 4 devices (OnePlus BT + Bassheads USB-C +
+  Apple EarPods USB-C + Realtek speakers). Engine counters showed no ongoing underruns, so the cause may
+  be outside the engine. Leads: Windows default mic is "AI Noise-cancelling Input (ASUS Utility)"
+  (ASUS/Armoury Crate running), a Bluetooth headset switching to hands-free mode, two USB-C audio devices
+  on one port/hub, Realtek speaker loopback was silent during one live test. Next: ask which device
+  crackles, test with 2/3/4 devices, and record loopbacks of each with a proper click detector.
+
 ## Office PC findings (hardware-specific, may not apply at home)
 - Motherboard **Gigabyte Z790 D AX**: Realtek ALC897 audio, Realtek **8852CE** Wi-Fi 6E + Bluetooth.
 - Bluetooth radio was **switched off** and on Microsoft's generic driver → scans found nothing.
