@@ -2,7 +2,7 @@
 
 > **New chat?** Start with: *"Read HANDOFF.md and README.md in this repo, then help me continue."*
 
-Last updated: 2026-11-25 (worked on the office PC).
+Last updated: 2026-11-26 (worked on the office PC).
 
 ## Goal
 Watch a movie on a Windows PC and hear the sound on **several headphones at once**:
@@ -52,6 +52,13 @@ volume and sync delay. (Phones can't do this from a normal app, so we chose a Wi
   re-pair fresh (phone Bluetooth OFF, case button ~3 s until white blink, Add device → Bluetooth)
   and re-run the test. If it still drops: attach the motherboard Wi-Fi/BT **antennas**, and keep
   the phone from grabbing the buds (they support dual connection).
+- **Most likely root cause: the motherboard's Wi-Fi/Bluetooth antennas are not connected.**
+  Wi-Fi and Bluetooth share one chip and the same antennas. With working drivers and the radio on,
+  Wi-Fi saw **0 networks** and Bluetooth only saw 2–4 very close devices, so the chip barely
+  receives anything. Fix: screw the antenna from the Gigabyte box onto the two gold connectors at
+  the back of the PC, buy a dual-band RP-SMA antenna, or use a **USB Bluetooth 5.x dongle**
+  (e.g. TP-Link UB500). (Not yet confirmed that the phone sees Wi-Fi networks at that spot.)
+- A 5-minute wait-for-OnePlus test after the re-pair timed out because the buds were never re-paired.
 - **Boult earbuds ("SHK BOULTT")** are not paired yet. The PC only saw their Bluetooth LE signal; one
   pairing attempt failed authentication. Needs: forget on phone, phone BT off, reset/pairing mode.
 
